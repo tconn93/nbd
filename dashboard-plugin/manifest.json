@@ -1,0 +1,13 @@
+{
+  "name": "hermes-fleet",
+  "label": "Fleet",
+  "description": "Manage connected Hermes agents — view nodes, sessions, and communicate across the fleet.",
+  "icon": "Globe",
+  "version": "0.1.0",
+  "tab": {
+    "path": "/fleet",
+    "position": "after:skills"
+  },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}
