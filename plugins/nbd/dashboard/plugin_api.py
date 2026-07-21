@@ -94,6 +94,29 @@ class MessageRequest(BaseModel):
     content: str
 
 
+# ── Setup Info ─────────────────────────────────────────────────────────
+
+@router.get("/setup-command")
+async def get_setup_command():
+    """Return the command a node agent should run to connect to this master."""
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        ip = "127.0.0.1"
+    port = "9119"
+    master_url = f"http://{ip}:{port}"
+
+    return {
+        "master_url": master_url,
+        "command": f"nbd setup node --master {master_url}",
+        "install_command": f"git clone git@github.com:tconn93/nbd.git && cd nbd && ./nbd setup node --master {master_url}",
+    }
+
+
 # ── Node Endpoints ───────────────────────────────────────────────────────
 
 @router.post("/nodes/register")

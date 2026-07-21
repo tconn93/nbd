@@ -3,9 +3,9 @@
 Hermes Fleet Setup — configure this agent as Master or Node.
 
 Usage:
-    hermes-fleet setup          # Interactive setup
-    hermes-fleet setup master   # Set up as fleet master
-    hermes-fleet setup node     # Set up as a worker node
+    nbd setup          # Interactive setup
+    nbd setup master   # Set up as fleet master
+    nbd setup node     # Set up as a worker node
     hermes-fleet status         # Show current fleet config
 """
 
@@ -206,7 +206,7 @@ def cmd_setup_master():
     print(f"  Fleet tab: {cfg['dashboard_url']}  → click 'Fleet'")
     print(f"{'='*50}")
     print(f"\n📌 Connect worker nodes:")
-    print(f"  hermes-fleet setup node --master {cfg['dashboard_url']}")
+    print(f"  nbd setup node --master {cfg['dashboard_url']}")
     print()
 
 
@@ -311,7 +311,7 @@ def cmd_status():
         except Exception:
             print("  ⚠️  Proxy not reachable")
     else:
-        print("  Run: hermes-fleet setup")
+        print("  Run: nbd setup")
 
 
 def main():
@@ -335,8 +335,8 @@ def main():
             cmd_setup_node(args.master)
         else:
             print("Select role:")
-            print("  hermes-fleet setup master   — This agent is the fleet orchestrator")
-            print("  hermes-fleet setup node     — This agent is a worker node")
+            print("  nbd setup master   — This agent is the fleet orchestrator")
+            print("  nbd setup node     — This agent is a worker node")
             sys.exit(1)
     elif args.command == "status":
         cmd_status()

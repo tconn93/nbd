@@ -128,6 +128,37 @@
     );
   }
 
+  // ── Setup Instructions ────────────────────────────────────────────────
+  function SetupInstructions() {
+    const [setup, setSetup] = useState(null);
+    useEffect(() => {
+      fetchJSON(`${API}/setup-command`).then(setSetup).catch(() => {});
+    }, []);
+    const cmd = setup ? setup.command : "hermes-fleet setup node --master <master-url>";
+
+    return React.createElement(Card, null,
+      React.createElement(CardContent, { className: "py-8 text-center text-sm text-muted-foreground" },
+        "No connected nodes.",
+        React.createElement("div", { className: "mt-3 text-xs" },
+          "Run this on any Hermes agent to connect it as a node:"
+        ),
+        React.createElement("div", { className: "mt-3 p-3 bg-muted/30 rounded text-left text-xs font-mono" },
+          React.createElement("div", { className: "font-medium text-foreground mb-1" }, "# Install the fleet CLI and connect:"),
+          React.createElement("code", { className: "block text-green-400" },
+            setup
+              ? `git clone git@github.com:tconn93/nbd.git && cd nbd && ${setup.command}`
+              : "git clone git@github.com:tconn93/nbd.git && cd nbd && ./nbd setup node --master <master-url>"
+          ),
+        ),
+        setup
+          ? React.createElement("div", { className: "mt-2 text-xs text-muted-foreground" },
+              `Master URL: ${setup.master_url}`
+            )
+          : null,
+      ),
+    );
+  }
+
   // ── Main Fleet Page ────────────────────────────────────────────────────
   function FleetPage() {
     const [nodes, setNodes] = useState([]);

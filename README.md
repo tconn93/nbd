@@ -1,59 +1,58 @@
 # NBD — Node Big Deal: Hermes Fleet Plugin
 
-A Hermes dashboard plugin for managing a fleet of connected Hermes agents.
-Nodes expose their API via `hermes proxy` and register with the fleet orchestrator.
+Manage a fleet of Hermes agents. One master orchestrator, many worker nodes.
 
 ## Quick Start
 
+### Master (one command)
+
 ```bash
-# 1. Install the plugin
-cp -r dashboard-plugin ~/.hermes/dashboard-plugins/hermes-fleet
-
-# 2. Install the skill
-cp skill/SKILL.md ~/.hermes/skills/hermes-fleet/SKILL.md
-
-# 3. Restart the dashboard
-hermes dashboard --host 0.0.0.0 --port 9119
+git clone git@github.com:tconn93/nbd.git ~/nbd
+cd ~/nbd && ./nbd setup master
 ```
 
 Open `http://<your-ip>:9119` → **Fleet** tab.
 
-## How Nodes Connect
-
-Each remote Hermes agent:
+### Node (one command)
 
 ```bash
-# Expose the agent as an OpenAI-compatible API
-hermes proxy --port 8080
-
-# Register with the fleet
-curl -X POST http://<ORCH_IP>:9119/api/plugins/hermes-fleet/nodes/register \
-  -H "Content-Type: application/json" \
-  -d '{"api_url": "http://<NODE_IP>:8080", "name": "my-node"}'
+~/nbd/nbd setup node --master http://<master-ip>:9119
 ```
 
-The node appears in the Fleet dashboard automatically.
+## How Nodes Connect
 
-## Structure
+The master auto-detects its own IP and displays the exact command to run.
+Open the Fleet tab on a master with no nodes to see:
+
+```bash
+git clone git@github.com:tconn93/nbd.git && cd nbd && ./nbd setup node --master http://10.0.171.31:9119
+```
+
+## What Each Mode Does
+
+**Master** — Installs the Fleet dashboard plugin, configures auth, starts `hermes dashboard --host 0.0.0.0`, exposes API at `/api/plugins/nbd/`.
+
+**Node** — Starts `hermes proxy --port 8080` (OpenAI-compatible API), registers with the master.
+
+## Repo Structure
 
 ```
 nbd/
-├── dashboard-plugin/       # Hermes dashboard plugin
-│   ├── manifest.json       # Plugin manifest
-│   ├── plugin_api.py       # Backend API (registration, chat, sessions)
-│   └── dist/
-│       └── index.js        # React UI (Fleet tab)
-├── skill/
-│   └── SKILL.md            # Hermes skill for the orchestrator agent
-└── README.md
+├── nbd                      # CLI setup command (chmod +x, zero deps)
+├── plugins/nbd/dashboard/   # Hermes dashboard plugin
+│   ├── manifest.json
+│   ├── plugin_api.py
+│   └── dist/index.js
+└── skill/SKILL.md           # Hermes agent skill
 ```
 
 ## API Endpoints
 
-All at `/api/plugins/hermes-fleet/`:
+All at `/api/plugins/nbd/`:
 
 | Method | Path | Description |
 |---|---|---|
+| GET | `/setup-command` | Get master URL + connect command |
 | GET | `/nodes` | List nodes |
 | POST | `/nodes/register` | Register a node |
 | POST | `/nodes/heartbeat` | Heartbeat |

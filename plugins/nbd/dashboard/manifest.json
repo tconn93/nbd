@@ -1,7 +1,7 @@
 {
-  "name": "hermes-fleet",
+  "name": "nbd",
   "label": "Fleet",
-  "description": "Manage connected Hermes agents — view nodes, sessions, and communicate across the fleet.",
+  "description": "Manage connected Hermes agents \u2014 view nodes, sessions, and communicate across the fleet.",
   "icon": "Globe",
   "version": "0.1.0",
   "tab": {
