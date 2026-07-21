@@ -313,6 +313,12 @@ def cmd_setup_master():
     print(f"  nbd setup node --master http://{local_ip}:9119\n")
 
 
+def cmd_serve(port: int = 9005, host: str = "0.0.0.0"):
+    """Start the standalone Fleet API server (HTTP + MCP)."""
+    from server import run as run_fleet_api
+    run_fleet_api(port=port, host=host)
+
+
 def cmd_generate_token(hours: int = 24, desc: str = ""):
     """Generate a registration token and write it directly to the fleet DB."""
     import secrets
@@ -465,6 +471,10 @@ def main():
     svc_p = sub.add_parser("service", help="Manage systemd service")
     svc_p.add_argument("action", choices=["install", "uninstall"])
 
+    serve_p = sub.add_parser("serve", help="Start the standalone Fleet API server")
+    serve_p.add_argument("--port", type=int, default=9005, help="Port (default 9005)")
+    serve_p.add_argument("--host", default="0.0.0.0", help="Host (default 0.0.0.0)")
+
     sub.add_parser("status", help="Show fleet status")
 
     args = parser.parse_args()
@@ -478,6 +488,8 @@ def main():
             print("Usage: nbd setup master | nbd setup node --master <url>")
     elif args.command == "generate-token":
         cmd_generate_token(hours=args.hours, desc=args.desc)
+    elif args.command == "serve":
+        cmd_serve(port=args.port, host=args.host)
     elif args.command == "service":
         if args.action == "install":
             cmd_service_install()
