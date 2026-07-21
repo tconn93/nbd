@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Hermes Fleet Setup — configure this agent as Master or Node.
+nbd — Hermes Fleet Orchestration Setup
 
 Usage:
-    nbd setup          # Interactive setup
-    nbd setup master   # Set up as fleet master
-    nbd setup node     # Set up as a worker node
-    hermes-fleet status         # Show current fleet config
+    nbd setup master            Set up as fleet master (interview-style)
+    nbd setup node --master URL Set up as a worker node
+    nbd status                  Show fleet config and status
+    nbd service install         Install dashboard as a systemd user service
+    nbd service uninstall       Remove the systemd service
 """
 
 import argparse
@@ -15,12 +16,14 @@ import os
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
-
 
 HERMES_HOME = Path.home() / ".hermes"
 FLEET_CONFIG = HERMES_HOME / "fleet_config.json"
-PLUGIN_DIR = HERMES_HOME / "plugins" / "hermes-fleet" / "dashboard"
+PLUGIN_DIR = HERMES_HOME / "plugins" / "nbd"
+SERVICE_NAME = "hermes-dashboard"
+SERVICE_FILE = Path.home() / ".config" / "systemd" / "user" / f"{SERVICE_NAME}.service"
 
 
 def _get_local_ip() -> str:
@@ -37,7 +40,6 @@ def _get_local_ip() -> str:
 def _save_config(cfg: dict):
     FLEET_CONFIG.parent.mkdir(parents=True, exist_ok=True)
     FLEET_CONFIG.write_text(json.dumps(cfg, indent=2))
-    print(f"  Config saved to {FLEET_CONFIG}")
 
 
 def _load_config() -> dict:
@@ -46,192 +48,292 @@ def _load_config() -> dict:
     return {"mode": None}
 
 
-def _install_plugin():
-    """Copy plugin files to ~/.hermes/plugins/hermes-fleet/dashboard/."""
-    # Find the plugin source directory (same dir as this script, or ../plugins)
+def _prompt(default: str = "") -> str:
+    """Simple input with fallback."""
+    try:
+        return input().strip() or default
+    except (EOFError, KeyboardInterrupt):
+        return default
+
+
+# ── Plugin Install ────────────────────────────────────────────────────────
+
+def _find_plugin_src() -> Path | None:
     script_dir = Path(__file__).resolve().parent
-    candidates = [
-        script_dir / "plugins" / "hermes-fleet" / "dashboard",
-        script_dir.parent / "plugins" / "hermes-fleet" / "dashboard",
-        Path.cwd() / "plugins" / "hermes-fleet" / "dashboard",
-    ]
-    src = None
-    for c in candidates:
-        if (c / "manifest.json").exists():
-            src = c
-            break
+    for c in [
+        script_dir / "plugins" / "nbd",
+        script_dir.parent / "plugins" / "nbd",
+        Path.cwd() / "plugins" / "nbd",
+    ]:
+        if (c / "plugin.yaml").exists():
+            return c
+    return None
+
+
+def _install_plugin():
+    src = _find_plugin_src()
     if not src:
-        print("  ❌ Cannot find plugin source. Run this from the nbd repo directory.")
-        print(f"     Looked in: {[str(c) for c in candidates]}")
+        print("  ❌ Cannot find plugin source. Run from the nbd repo directory.")
         return False
 
-    # Copy to destination
-    dst = HERMES_HOME / "plugins" / "hermes-fleet" / "dashboard"
+    dst = PLUGIN_DIR
     dst.mkdir(parents=True, exist_ok=True)
+
     for item in src.iterdir():
-        if item.is_dir() and item.name == "dist":
-            (dst / "dist").mkdir(parents=True, exist_ok=True)
-            for f in (src / "dist").iterdir():
-                (dst / "dist" / f.name).write_text(f.read_text())
-        elif item.suffix in (".json", ".py", ".js", ".css"):
+        if item.name == "dashboard":
+            dd = dst / "dashboard"
+            dd.mkdir(parents=True, exist_ok=True)
+            (dd / "manifest.json").write_text((item / "manifest.json").read_text())
+            (dd / "plugin_api.py").write_text((item / "plugin_api.py").read_text())
+            (dd / "dist").mkdir(exist_ok=True)
+            (dd / "dist" / "index.js").write_text((item / "dist" / "index.js").read_text())
+        elif item.suffix in (".py", ".yaml", ".json", ".js", ".css", ".md"):
             (dst / item.name).write_text(item.read_text())
 
-    print(f"  ✅ Plugin installed to {dst}")
+    print(f"  ✅ Plugin installed → {dst}")
     return True
 
 
+# ── Config Setup ──────────────────────────────────────────────────────────
+
 def _enable_plugin_in_config():
-    """Add hermes-fleet to plugins.enabled in config.yaml (proper YAML list)."""
+    import yaml
     config_path = HERMES_HOME / "config.yaml"
     if not config_path.exists():
-        print("  ❌ config.yaml not found")
         return False
 
-    try:
-        import yaml
-    except ImportError:
-        # Fallback: manual line-based approach
-        content = config_path.read_text()
-        if "plugins:" not in content:
-            content += "\nplugins:\n  enabled:\n    - hermes-fleet\n"
-            config_path.write_text(content)
-            print("  ✅ Added plugins.enabled to config.yaml")
-            return True
-        # Try to find the enabled line and replace
-        lines = content.split("\n")
-        in_plugins = False
-        found = False
-        for i, line in enumerate(lines):
-            if line.strip().startswith("plugins:"):
-                in_plugins = True
-                continue
-            if in_plugins:
-                if line.strip().startswith("enabled:"):
-                    lines[i] = "  enabled:"
-                    # Check if next line is a list item
-                    if i + 1 < len(lines) and lines[i + 1].strip().startswith("-"):
-                        lines[i + 1] = "    - hermes-fleet"
-                    else:
-                        lines.insert(i + 1, "    - hermes-fleet")
-                    found = True
-                    break
-                if line and not line[0].isspace():
-                    lines.insert(i, "  enabled:\n    - hermes-fleet")
-                    found = True
-                    break
-        if not found:
-            lines.append("  enabled:\n    - hermes-fleet")
-        config_path.write_text("\n".join(lines))
-        print("  ✅ Added hermes-fleet to plugins.enabled")
-        return True
-
-    # Use PyYAML for clean parsing
     with open(config_path) as f:
         cfg = yaml.safe_load(f) or {}
+
     plugins = cfg.setdefault("plugins", {})
     enabled = plugins.setdefault("enabled", [])
     if not isinstance(enabled, list):
         enabled = []
-    if "hermes-fleet" not in enabled:
-        enabled.append("hermes-fleet")
+    if "nbd" not in enabled:
+        enabled.append("nbd")
     plugins["enabled"] = enabled
     cfg["plugins"] = plugins
+
     with open(config_path, "w") as f:
-        yaml.dump(cfg, f, default_flow_style=False)
-    print("  ✅ Added hermes-fleet to plugins.enabled")
+        yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+    print("  ✅ Plugin enabled in Hermes config")
     return True
 
 
-def cmd_setup_master():
-    """Configure this agent as the fleet master (orchestrator)."""
-    print("\n╔══════════════════════════════════════════╗")
-    print("║  Setting up as FLEET MASTER             ║")
-    print("╚══════════════════════════════════════════╝\n")
+# ── Database Setup ────────────────────────────────────────────────────────
 
-    # Step 1: Install the plugin
-    print("📦 Installing fleet plugin...")
-    if not _install_plugin():
-        sys.exit(1)
+def _setup_database() -> dict:
+    """Ask user about database backend. Returns db config dict."""
+    print("\n  ── Database Backend ──")
+    print("  How should nbd store its data (nodes, sessions)?")
+    print("")
+    print("    [1] SQLite (default) — simple, no setup needed")
+    print("    [2] Postgres — use an existing Postgres instance")
+    print("    [3] Docker Postgres — auto-deploy a Postgres container")
+    print("")
+    print("  Choice [1]: ", end="", flush=True)
 
-    # Step 2: Enable it in config
-    print("🔧 Enabling plugin in Hermes config...")
-    _enable_plugin_in_config()
+    choice = _prompt("1")
 
-    # Step 3: Set up dashboard auth for network access
-    print("🔑 Setting up dashboard auth...")
+    if choice == "2":
+        print("\n  Enter Postgres connection URL:")
+        print("  Example: postgresql://user:pass@host:5432/nbd")
+        print("  URL: ", end="", flush=True)
+        url = _prompt()
+        if url:
+            print(f"  ✅ Using Postgres: {url[:40]}...")
+            return {"backend": "postgres", "url": url}
+        print("  ⚠️  No URL entered, falling back to SQLite")
+
+    elif choice == "3":
+        print("\n  🐘 Deploying Postgres via Docker...")
+        pw = os.urandom(16).hex()
+        try:
+            subprocess.run(
+                ["docker", "run", "-d",
+                 "--name", "nbd-db",
+                 "-e", f"POSTGRES_PASSWORD={pw}",
+                 "-e", "POSTGRES_DB=nbd",
+                 "-p", "5432:5432",
+                 "-v", "nbd-db-data:/var/lib/postgresql/data",
+                 "postgres:16-alpine"],
+                check=True, capture_output=True, text=True,
+            )
+            url = f"postgresql://postgres:{pw}@127.0.0.1:5432/nbd"
+            print(f"  ✅ Postgres container started!")
+            print(f"  ✅ Connection: postgresql://postgres:****@127.0.0.1:5432/nbd")
+            return {"backend": "docker-postgres", "url": url, "password": pw}
+        except FileNotFoundError:
+            print("  ❌ Docker not found. Install Docker or choose SQLite.")
+        except subprocess.CalledProcessError as e:
+            print(f"  ❌ Docker failed: {e.stderr.strip() or 'container may already exist'}")
+            print("  Run: docker rm -f nbd-db && nbd setup master")
+
+    print("  ✅ Using SQLite")
+    return {"backend": "sqlite"}
+
+
+# ── Service Install ───────────────────────────────────────────────────────
+
+def _install_service():
+    """Install hermes-dashboard as a systemd user service."""
+    print("\n  ── Systemd Service ──")
+
+    service_content = f"""\
+[Unit]
+Description=nbd Hermes Fleet Dashboard
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={sys.executable} -m hermes dashboard --host 0.0.0.0 --port 9119
+Restart=always
+RestartSec=5
+Environment=NBD_DATABASE_URL={_load_config().get("db_url", "")}
+
+[Install]
+WantedBy=default.target
+"""
+    SERVICE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SERVICE_FILE.write_text(service_content)
+
+    try:
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=True, capture_output=True)
+        subprocess.run(["systemctl", "--user", "enable", SERVICE_NAME], check=True, capture_output=True)
+        subprocess.run(["systemctl", "--user", "start", SERVICE_NAME], check=True, capture_output=True)
+
+        # Enable linger so user services survive logout
+        subprocess.run(["loginctl", "enable-linger", os.environ.get("USER", "tcon")],
+                       check=False, capture_output=True)
+
+        print(f"  ✅ Service installed: {SERVICE_NAME}")
+        print(f"  ✅ Status: systemctl --user status {SERVICE_NAME}")
+    except subprocess.CalledProcessError as e:
+        print(f"  ❌ Service install failed: {e.stderr.decode()[:200]}")
+        print("  You can start manually: hermes dashboard --host 0.0.0.0 --port 9119")
+        return False
+
+    return True
+
+
+def cmd_service_install():
+    """Install the dashboard as a systemd service."""
+    _install_service()
+
+
+def cmd_service_uninstall():
+    """Remove the systemd service."""
+    if SERVICE_FILE.exists():
+        subprocess.run(["systemctl", "--user", "stop", SERVICE_NAME], check=False)
+        subprocess.run(["systemctl", "--user", "disable", SERVICE_NAME], check=False)
+        SERVICE_FILE.unlink()
+        subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+        print(f"  ✅ Service {SERVICE_NAME} removed")
+    else:
+        print("  ℹ️  Service not installed")
+
+
+# ── Auth Setup ────────────────────────────────────────────────────────────
+
+def _setup_auth():
+    """Configure dashboard basic auth."""
     result = subprocess.run(
         ["hermes", "config", "get", "dashboard.basic_auth.username"],
         capture_output=True, text=True,
     )
     if result.returncode != 0 or not result.stdout.strip():
-        subprocess.run(
-            ["hermes", "config", "set", "dashboard.basic_auth.username", "admin"],
-            capture_output=True,
-        )
+        subprocess.run(["hermes", "config", "set", "dashboard.basic_auth.username", "admin"],
+                       capture_output=True)
         hash_result = subprocess.run(
-            ["python3", "-c", "from plugins.dashboard_auth.basic import hash_password; print(hash_password('hermes'))"],
+            ["python3", "-c",
+             "from plugins.dashboard_auth.basic import hash_password; print(hash_password('hermes'))"],
             capture_output=True, text=True,
         )
         if hash_result.returncode == 0:
-            pw_hash = hash_result.stdout.strip()
             subprocess.run(
-                ["hermes", "config", "set", "dashboard.basic_auth.password_hash", pw_hash],
+                ["hermes", "config", "set", "dashboard.basic_auth.password_hash",
+                 hash_result.stdout.strip()],
                 capture_output=True,
             )
         print("  ✅ Login: admin / hermes")
     else:
-        print(f"  ✅ Auth already configured")
+        print("  ✅ Auth already configured")
 
-    # Step 4: Kill old dashboard, start fresh
-    print("🚀 Restarting Hermes Dashboard...")
-    subprocess.run(["pkill", "-f", "hermes dashboard"], capture_output=True)
-    subprocess.Popen(
-        ["hermes", "dashboard", "--host", "0.0.0.0", "--port", "9119"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
 
-    # Step 5: Save fleet config
+# ── Setup Commands ───────────────────────────────────────────────────────
+
+def cmd_setup_master():
+    """Interview-style master setup."""
+    print("\n" + "=" * 56)
+    print("  nbd — Fleet Master Setup")
+    print("=" * 56)
+
+    # 1. Plugin
+    print("\n📦 Step 1/5: Installing plugin...")
+    if not _install_plugin():
+        sys.exit(1)
+
+    # 2. Enable
+    print("\n🔧 Step 2/5: Enabling plugin in Hermes...")
+    _enable_plugin_in_config()
+
+    # 3. Database
+    print("\n🗄️  Step 3/5: Database setup...")
+    db_cfg = _setup_database()
+
+    # 4. Auth
+    print("\n🔑 Step 4/5: Dashboard authentication...")
+    _setup_auth()
+
+    # 5. Service
+    print("\n🚀 Step 5/5: Service installation...")
+    svc_ok = _install_service()
+
+    # Summary
     local_ip = _get_local_ip()
     cfg = {
         "mode": "master",
+        "db": db_cfg,
         "dashboard_url": f"http://{local_ip}:9119",
-        "fleet_api": f"http://127.0.0.1:9119/api/plugins/hermes-fleet",
+        "fleet_api": f"http://127.0.0.1:9119/api/plugins/nbd",
     }
+    if db_cfg.get("url"):
+        cfg["db_url"] = db_cfg["url"]
     _save_config(cfg)
 
-    print(f"\n{'='*50}")
-    print(f"  ✅ Master is ready!")
-    print(f"  Dashboard: {cfg['dashboard_url']}")
-    print(f"  Login:     admin / hermes")
-    print(f"  Fleet tab: {cfg['dashboard_url']}  → click 'Fleet'")
-    print(f"{'='*50}")
-    print(f"\n📌 Connect worker nodes:")
-    print(f"  nbd setup node --master {cfg['dashboard_url']}")
-    print()
+    print("\n" + "=" * 56)
+    print("  ✅ Master is ready!")
+    print(f"  Dashboard:  http://{local_ip}:9119")
+    print(f"  Login:      admin / hermes")
+    print(f"  Fleet tab:  Dashboard → Fleet")
+    print(f"  Database:   {db_cfg['backend']}")
+    print(f"  Service:    {'✅ Running' if svc_ok else '⚠️  Manual start needed'}")
+    print("=" * 56)
+    print("\n📌 Connect workers:")
+    print(f"  nbd setup node --master http://{local_ip}:9119\n")
 
 
 def cmd_setup_node(master_url: str = None):
-    """Configure this agent as a fleet node (worker)."""
-    print("\n╔══════════════════════════════════════════╗")
-    print("║  Setting up as FLEET NODE               ║")
-    print("╚══════════════════════════════════════════╝\n")
+    """Configure as a fleet node."""
+    print("\n" + "=" * 56)
+    print("  nbd — Fleet Node Setup")
+    print("=" * 56)
 
     if not master_url:
-        master_url = input("  Master dashboard URL (e.g. http://10.0.1.50:9119): ").strip()
+        print("\n  Master dashboard URL: ", end="", flush=True)
+        master_url = _prompt()
         if not master_url:
             print("  ❌ Master URL required")
             sys.exit(1)
-
     master_url = master_url.rstrip("/")
 
-    # Get a name for this node
     default_name = f"node-{socket.gethostname()}"
-    node_name = input(f"  Node name [{default_name}]: ").strip() or default_name
+    print(f"\n  Node name [{default_name}]: ", end="", flush=True)
+    node_name = _prompt(default_name)
 
-    # Determine port for hermes proxy
-    proxy_port = input("  Port for hermes proxy [8080]: ").strip() or "8080"
+    print(f"  Port for hermes proxy [8080]: ", end="", flush=True)
+    proxy_port = _prompt("8080")
 
-    # Save config
     local_ip = _get_local_ip()
     cfg = {
         "mode": "node",
@@ -247,11 +349,9 @@ def cmd_setup_node(master_url: str = None):
         ["hermes", "proxy", "--port", proxy_port, "--host", "0.0.0.0"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-
     print(f"  ✅ Proxy running at {cfg['proxy_url']}")
 
-    # Register with master
-    print(f"  Registering with master at {master_url}...")
+    print(f"  Registering with master...")
     import urllib.request
     payload = json.dumps({
         "node_id": f"node-{socket.gethostname()}",
@@ -261,70 +361,60 @@ def cmd_setup_node(master_url: str = None):
 
     try:
         req = urllib.request.Request(
-            f"{master_url}/api/plugins/hermes-fleet/nodes/register",
+            f"{master_url}/api/plugins/nbd/nodes/register",
             data=payload,
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=10) as resp:
             result = json.loads(resp.read())
-            print(f"  ✅ Registered! Node ID: {result.get('node_id', 'unknown')}")
+            print(f"  ✅ Registered! ID: {result.get('node_id', 'unknown')}")
     except Exception as e:
         print(f"  ⚠️  Registration failed: {e}")
-        print("  Run this to register later:")
-        print(f'  curl -X POST {master_url}/api/plugins/hermes-fleet/nodes/register \\')
+        print(f"  Manual: curl -X POST {master_url}/api/plugins/nbd/nodes/register \\")
         print(f'    -H "Content-Type: application/json" \\')
         print(f'    -d \'{{"api_url": "{cfg["proxy_url"]}", "name": "{node_name}"}}\'')
 
-    print(f"\n📋 Node setup complete!")
+    print(f"\n✅ Node setup complete!\n")
 
 
 def cmd_status():
-    """Show current fleet configuration."""
+    """Show fleet status."""
     cfg = _load_config()
     mode = cfg.get("mode", "not configured")
-
-    print(f"\nHermes Fleet Status")
+    print(f"\nnbd Fleet Status")
     print(f"  Mode: {mode}")
 
     if mode == "master":
         print(f"  Dashboard: {cfg.get('dashboard_url', 'unknown')}")
-        print(f"  Fleet API: {cfg.get('fleet_api', 'unknown')}")
-        # Quick check if dashboard is running
+        print(f"  Database:  {cfg.get('db', {}).get('backend', 'unknown')}")
         import urllib.request
         try:
             resp = urllib.request.urlopen(f"{cfg['fleet_api']}/nodes", timeout=3)
             data = json.loads(resp.read())
-            print(f"  Connected nodes: {data.get('count', 0)}")
+            print(f"  Nodes:     {data.get('count', 0)} connected")
             for n in data.get("nodes", []):
-                print(f"    - {n.get('name', n['id']):25s} {n.get('status', '?'):10s} {n.get('api_url', '')}")
+                print(f"    · {n.get('name', n['id']):25s} [{n.get('status', '?')}]")
         except Exception:
             print("  ⚠️  Dashboard not reachable")
-
     elif mode == "node":
         print(f"  Master: {cfg.get('master_url', 'unknown')}")
         print(f"  Proxy:  {cfg.get('proxy_url', 'unknown')}")
-        # Check if proxy is running
-        import urllib.request
-        try:
-            resp = urllib.request.urlopen(f"{cfg['proxy_url']}/v1/models", timeout=3)
-            print("  ✅ Proxy is running")
-        except Exception:
-            print("  ⚠️  Proxy not reachable")
     else:
-        print("  Run: nbd setup")
+        print("  Run: nbd setup master  or  nbd setup node --master <url>")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Hermes Fleet — multi-agent setup")
+    parser = argparse.ArgumentParser(description="nbd — Hermes Fleet Orchestration")
     sub = parser.add_subparsers(dest="command")
 
-    # Setup
-    setup_p = sub.add_parser("setup", help="Configure this agent as master or node")
-    setup_p.add_argument("role", nargs="?", choices=["master", "node"], help="Role to configure")
+    setup_p = sub.add_parser("setup", help="Set up as master or node")
+    setup_p.add_argument("role", nargs="?", choices=["master", "node"])
     setup_p.add_argument("--master", "-m", help="Master URL (for node setup)")
 
-    # Status
-    sub.add_parser("status", help="Show fleet configuration and status")
+    svc_p = sub.add_parser("service", help="Manage systemd service")
+    svc_p.add_argument("action", choices=["install", "uninstall"])
+
+    sub.add_parser("status", help="Show fleet status")
 
     args = parser.parse_args()
 
@@ -334,10 +424,12 @@ def main():
         elif args.role == "node":
             cmd_setup_node(args.master)
         else:
-            print("Select role:")
-            print("  nbd setup master   — This agent is the fleet orchestrator")
-            print("  nbd setup node     — This agent is a worker node")
-            sys.exit(1)
+            print("Usage: nbd setup master | nbd setup node --master <url>")
+    elif args.command == "service":
+        if args.action == "install":
+            cmd_service_install()
+        else:
+            cmd_service_uninstall()
     elif args.command == "status":
         cmd_status()
     else:

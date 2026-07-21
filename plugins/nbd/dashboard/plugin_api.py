@@ -9,6 +9,7 @@ API mounted at /api/plugins/hermes-fleet/
 
 import json
 import logging
+import os
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -25,12 +26,80 @@ router = APIRouter()
 HERMES_HOME = Path.home() / ".hermes"
 DB_PATH = HERMES_HOME / "fleet.db"
 
+# ── Database engine (SQLite or Postgres) ──────────────────────────────
+
+_DATABASE_URL = os.environ.get("NBD_DATABASE_URL", "")
 
 def _db():
-    """Get or create the SQLite database."""
+    """Get a database connection. SQLite by default, Postgres if NBD_DATABASE_URL is set."""
+    if _DATABASE_URL:
+        return _pg_db()
+    return _sqlite_db()
+
+def _sqlite_db():
     db = sqlite3.connect(str(DB_PATH))
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")
+    _sqlite_migrate(db)
+    db.commit()
+    return db
+
+
+def _pg_db():
+    """Get a Postgres database connection."""
+    try:
+        import asyncpg
+    except ImportError:
+        raise RuntimeError("NBD_DATABASE_URL is set but asyncpg is not installed. Run: pip install asyncpg")
+
+    async def _connect():
+        return await asyncpg.connect(_DATABASE_URL)
+
+    if not hasattr(_pg_db, "_conn"):
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+        _pg_db._conn = loop.run_until_complete(_connect())
+        loop.run_until_complete(_pg_migrate(_pg_db._conn))
+    return _pg_db._conn
+
+
+async def _pg_migrate(conn):
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS nodes (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL DEFAULT '',
+            api_url TEXT NOT NULL,
+            api_key TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'offline',
+            last_heartbeat TEXT,
+            last_seen TEXT,
+            first_seen TEXT NOT NULL,
+            metadata TEXT NOT NULL DEFAULT '{}'
+        );
+        CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            node_id TEXT NOT NULL REFERENCES nodes(id),
+            title TEXT NOT NULL DEFAULT 'Untitled',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            message_count INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS messages (
+            id SERIAL PRIMARY KEY,
+            session_id TEXT NOT NULL REFERENCES sessions(id),
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_sessions_node ON sessions(node_id);
+        CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
+    """)
+
+
+def _sqlite_migrate(db):
     db.executescript("""
         CREATE TABLE IF NOT EXISTS nodes (
             id TEXT PRIMARY KEY,

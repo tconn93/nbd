@@ -1,0 +1,10 @@
+name: nbd
+version: 1.0.0
+description: "Hermes fleet orchestration — manage nodes, chat across agents, store sessions"
+author: Rork
+provides_tools:
+  - nbd_list_nodes
+  - nbd_node_status
+  - nbd_chat_with_node
+  - nbd_get_sessions
+  - nbd_get_session
