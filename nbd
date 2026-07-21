@@ -313,7 +313,33 @@ def cmd_setup_master():
     print(f"  nbd setup node --master http://{local_ip}:9119\n")
 
 
-def cmd_setup_node(master_url: str = None):
+def cmd_generate_token(hours: int = 24, desc: str = ""):
+    """Generate a registration token valid for N hours."""
+    print("\n  Generating registration token...")
+    import urllib.request
+    payload = json.dumps({"hours": hours, "description": desc}).encode()
+    try:
+        cfg = _load_config()
+        api_url = cfg.get("fleet_api", "http://127.0.0.1:9119/api/plugins/nbd")
+        req = urllib.request.Request(
+            f"{api_url}/tokens/generate",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+
+        print(f"\n  ✅ Token generated!")
+        print(f"  Token:     {data['token']}")
+        print(f"  Expires:   {data['expires_at'][:19]}")
+        print(f"  Valid for: {hours}h")
+        print(f"\n  📌 Give this command to the node agent:\n")
+        print(f"    {data['command']}\n")
+    except Exception as e:
+        print(f"  ❌ Failed: {e}")
+
+
+def cmd_setup_node(master_url: str = None, token: str = None):
     """Configure as a fleet node."""
     print("\n" + "=" * 56)
     print("  nbd — Fleet Node Setup")
@@ -353,11 +379,14 @@ def cmd_setup_node(master_url: str = None):
 
     print(f"  Registering with master...")
     import urllib.request
-    payload = json.dumps({
+    payload_dict = {
         "node_id": f"node-{socket.gethostname()}",
         "name": node_name,
         "api_url": cfg["proxy_url"],
-    }).encode()
+    }
+    if token:
+        payload_dict["token"] = token
+    payload = json.dumps(payload_dict).encode()
 
     try:
         req = urllib.request.Request(
@@ -410,6 +439,11 @@ def main():
     setup_p = sub.add_parser("setup", help="Set up as master or node")
     setup_p.add_argument("role", nargs="?", choices=["master", "node"])
     setup_p.add_argument("--master", "-m", help="Master URL (for node setup)")
+    setup_p.add_argument("--token", "-t", help="Registration token (from master generate-token)")
+
+    gen_p = sub.add_parser("generate-token", help="Generate a time-limited registration token (24h)")
+    gen_p.add_argument("--hours", type=int, default=24, help="Token validity in hours")
+    gen_p.add_argument("--desc", default="", help="Description for the token")
 
     svc_p = sub.add_parser("service", help="Manage systemd service")
     svc_p.add_argument("action", choices=["install", "uninstall"])
@@ -422,9 +456,11 @@ def main():
         if args.role == "master":
             cmd_setup_master()
         elif args.role == "node":
-            cmd_setup_node(args.master)
+            cmd_setup_node(args.master, args.token)
         else:
             print("Usage: nbd setup master | nbd setup node --master <url>")
+    elif args.command == "generate-token":
+        cmd_generate_token(hours=args.hours, desc=args.desc)
     elif args.command == "service":
         if args.action == "install":
             cmd_service_install()
