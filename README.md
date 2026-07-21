@@ -1,4 +1,4 @@
-# NBD — Hermes Fleet Plugin
+# NBD — Node Big Deal: Hermes Fleet Plugin
 
 A Hermes dashboard plugin for managing a fleet of connected Hermes agents.
 Nodes expose their API via `hermes proxy` and register with the fleet orchestrator.
