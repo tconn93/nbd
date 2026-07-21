@@ -46,25 +46,128 @@ def _load_config() -> dict:
     return {"mode": None}
 
 
+def _install_plugin():
+    """Copy plugin files to ~/.hermes/plugins/hermes-fleet/dashboard/."""
+    # Find the plugin source directory (same dir as this script, or ../plugins)
+    script_dir = Path(__file__).resolve().parent
+    candidates = [
+        script_dir / "plugins" / "hermes-fleet" / "dashboard",
+        script_dir.parent / "plugins" / "hermes-fleet" / "dashboard",
+        Path.cwd() / "plugins" / "hermes-fleet" / "dashboard",
+    ]
+    src = None
+    for c in candidates:
+        if (c / "manifest.json").exists():
+            src = c
+            break
+    if not src:
+        print("  ❌ Cannot find plugin source. Run this from the nbd repo directory.")
+        print(f"     Looked in: {[str(c) for c in candidates]}")
+        return False
+
+    # Copy to destination
+    dst = HERMES_HOME / "plugins" / "hermes-fleet" / "dashboard"
+    dst.mkdir(parents=True, exist_ok=True)
+    for item in src.iterdir():
+        if item.is_dir() and item.name == "dist":
+            (dst / "dist").mkdir(parents=True, exist_ok=True)
+            for f in (src / "dist").iterdir():
+                (dst / "dist" / f.name).write_text(f.read_text())
+        elif item.suffix in (".json", ".py", ".js", ".css"):
+            (dst / item.name).write_text(item.read_text())
+
+    print(f"  ✅ Plugin installed to {dst}")
+    return True
+
+
+def _enable_plugin_in_config():
+    """Add hermes-fleet to plugins.enabled in config.yaml (proper YAML list)."""
+    config_path = HERMES_HOME / "config.yaml"
+    if not config_path.exists():
+        print("  ❌ config.yaml not found")
+        return False
+
+    try:
+        import yaml
+    except ImportError:
+        # Fallback: manual line-based approach
+        content = config_path.read_text()
+        if "plugins:" not in content:
+            content += "\nplugins:\n  enabled:\n    - hermes-fleet\n"
+            config_path.write_text(content)
+            print("  ✅ Added plugins.enabled to config.yaml")
+            return True
+        # Try to find the enabled line and replace
+        lines = content.split("\n")
+        in_plugins = False
+        found = False
+        for i, line in enumerate(lines):
+            if line.strip().startswith("plugins:"):
+                in_plugins = True
+                continue
+            if in_plugins:
+                if line.strip().startswith("enabled:"):
+                    lines[i] = "  enabled:"
+                    # Check if next line is a list item
+                    if i + 1 < len(lines) and lines[i + 1].strip().startswith("-"):
+                        lines[i + 1] = "    - hermes-fleet"
+                    else:
+                        lines.insert(i + 1, "    - hermes-fleet")
+                    found = True
+                    break
+                if line and not line[0].isspace():
+                    lines.insert(i, "  enabled:\n    - hermes-fleet")
+                    found = True
+                    break
+        if not found:
+            lines.append("  enabled:\n    - hermes-fleet")
+        config_path.write_text("\n".join(lines))
+        print("  ✅ Added hermes-fleet to plugins.enabled")
+        return True
+
+    # Use PyYAML for clean parsing
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f) or {}
+    plugins = cfg.setdefault("plugins", {})
+    enabled = plugins.setdefault("enabled", [])
+    if not isinstance(enabled, list):
+        enabled = []
+    if "hermes-fleet" not in enabled:
+        enabled.append("hermes-fleet")
+    plugins["enabled"] = enabled
+    cfg["plugins"] = plugins
+    with open(config_path, "w") as f:
+        yaml.dump(cfg, f, default_flow_style=False)
+    print("  ✅ Added hermes-fleet to plugins.enabled")
+    return True
+
+
 def cmd_setup_master():
     """Configure this agent as the fleet master (orchestrator)."""
     print("\n╔══════════════════════════════════════════╗")
     print("║  Setting up as FLEET MASTER             ║")
     print("╚══════════════════════════════════════════╝\n")
 
-    # Ensure dashboard config has basic auth for network binding
-    print("🔧 Checking dashboard auth config...")
+    # Step 1: Install the plugin
+    print("📦 Installing fleet plugin...")
+    if not _install_plugin():
+        sys.exit(1)
+
+    # Step 2: Enable it in config
+    print("🔧 Enabling plugin in Hermes config...")
+    _enable_plugin_in_config()
+
+    # Step 3: Set up dashboard auth for network access
+    print("🔑 Setting up dashboard auth...")
     result = subprocess.run(
         ["hermes", "config", "get", "dashboard.basic_auth.username"],
         capture_output=True, text=True,
     )
     if result.returncode != 0 or not result.stdout.strip():
-        print("  ⚠️  Dashboard needs auth for network access. Setting default...")
         subprocess.run(
             ["hermes", "config", "set", "dashboard.basic_auth.username", "admin"],
             capture_output=True,
         )
-        # Generate password hash for "hermes"
         hash_result = subprocess.run(
             ["python3", "-c", "from plugins.dashboard_auth.basic import hash_password; print(hash_password('hermes'))"],
             capture_output=True, text=True,
@@ -75,41 +178,36 @@ def cmd_setup_master():
                 ["hermes", "config", "set", "dashboard.basic_auth.password_hash", pw_hash],
                 capture_output=True,
             )
-            print("  ✅ Login: admin / hermes")
+        print("  ✅ Login: admin / hermes")
     else:
-        print(f"  ✅ Auth already configured (user: {result.stdout.strip()})")
+        print(f"  ✅ Auth already configured")
 
-    # Ensure the plugin is installed
-    plugin_manifest = PLUGIN_DIR / "manifest.json"
-    if plugin_manifest.exists():
-        print("  ✅ Fleet plugin installed")
-    else:
-        print("  ❌ Fleet plugin not found at", plugin_manifest)
-        print("  Run: cp -r <repo>/plugins/hermes-fleet ~/.hermes/plugins/")
-        sys.exit(1)
-
-    # Save config
-    cfg = {
-        "mode": "master",
-        "dashboard_url": f"http://{_get_local_ip()}:9119",
-        "fleet_api": f"http://127.0.0.1:9119/api/plugins/hermes-fleet",
-    }
-    _save_config(cfg)
-
-    print("\n📋 Master is ready!")
-    print(f"  Dashboard:      {cfg['dashboard_url']}  (login: admin / hermes)")
-    print(f"  Fleet API:      {cfg['fleet_api']}")
-    print(f"\n📌 Other agents connect by running:")
-    print(f"  hermes-fleet setup node --master {cfg['dashboard_url']}")
-    print()
-
-    # Start dashboard if not running
-    print("🚀 Starting Hermes Dashboard...")
+    # Step 4: Kill old dashboard, start fresh
+    print("🚀 Restarting Hermes Dashboard...")
+    subprocess.run(["pkill", "-f", "hermes dashboard"], capture_output=True)
     subprocess.Popen(
         ["hermes", "dashboard", "--host", "0.0.0.0", "--port", "9119"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    print("  Dashboard starting on", cfg['dashboard_url'])
+
+    # Step 5: Save fleet config
+    local_ip = _get_local_ip()
+    cfg = {
+        "mode": "master",
+        "dashboard_url": f"http://{local_ip}:9119",
+        "fleet_api": f"http://127.0.0.1:9119/api/plugins/hermes-fleet",
+    }
+    _save_config(cfg)
+
+    print(f"\n{'='*50}")
+    print(f"  ✅ Master is ready!")
+    print(f"  Dashboard: {cfg['dashboard_url']}")
+    print(f"  Login:     admin / hermes")
+    print(f"  Fleet tab: {cfg['dashboard_url']}  → click 'Fleet'")
+    print(f"{'='*50}")
+    print(f"\n📌 Connect worker nodes:")
+    print(f"  hermes-fleet setup node --master {cfg['dashboard_url']}")
+    print()
 
 
 def cmd_setup_node(master_url: str = None):
