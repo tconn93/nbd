@@ -314,29 +314,46 @@ def cmd_setup_master():
 
 
 def cmd_generate_token(hours: int = 24, desc: str = ""):
-    """Generate a registration token valid for N hours."""
-    print("\n  Generating registration token...")
-    import urllib.request
-    payload = json.dumps({"hours": hours, "description": desc}).encode()
-    try:
-        cfg = _load_config()
-        api_url = cfg.get("fleet_api", "http://127.0.0.1:9119/api/plugins/nbd")
-        req = urllib.request.Request(
-            f"{api_url}/tokens/generate",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
+    """Generate a registration token and write it directly to the fleet DB."""
+    import secrets
+    from datetime import datetime, timezone, timedelta
+    import sqlite3
 
-        print(f"\n  ✅ Token generated!")
-        print(f"  Token:     {data['token']}")
-        print(f"  Expires:   {data['expires_at'][:19]}")
-        print(f"  Valid for: {hours}h")
-        print(f"\n  📌 Give this command to the node agent:\n")
-        print(f"    {data['command']}\n")
-    except Exception as e:
-        print(f"  ❌ Failed: {e}")
+    db_path = HERMES_HOME / "fleet.db"
+    if not db_path.exists():
+        print("  ❌ Fleet database not found. Has the master been set up?")
+        print("  Run: nbd setup master")
+        return
+
+    token = f"nbt_{secrets.token_urlsafe(32)}"
+    now = datetime.now(timezone.utc)
+    expires = now + timedelta(hours=max(1, min(hours, 720)))
+
+    db = sqlite3.connect(str(db_path))
+    try:
+        # Ensure tokens table exists
+        db.execute("""CREATE TABLE IF NOT EXISTS tokens (
+            id TEXT PRIMARY KEY, description TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+            used_at TEXT DEFAULT NULL, used_by TEXT DEFAULT NULL
+        )""")
+        db.execute(
+            "INSERT INTO tokens (id, description, created_at, expires_at) VALUES (?, ?, ?, ?)",
+            (token, desc[:200], now.isoformat(), expires.isoformat()),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    cfg = _load_config()
+    master_url = cfg.get("dashboard_url", f"http://{_get_local_ip()}:9119")
+
+    print(f"\n  ✅ Token generated!")
+    print(f"  Token:     {token}")
+    print(f"  Expires:   {expires.isoformat()[:19]}")
+    print(f"  Valid for: {hours}h")
+    print(f"\n  📌 Give this command to the node agent:\n")
+    print(f"    nbd setup node --master {master_url} --token {token}\n")
 
 
 def cmd_setup_node(master_url: str = None, token: str = None):
