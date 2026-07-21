@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""
+Hermes Fleet Setup — configure this agent as Master or Node.
+
+Usage:
+    hermes-fleet setup          # Interactive setup
+    hermes-fleet setup master   # Set up as fleet master
+    hermes-fleet setup node     # Set up as a worker node
+    hermes-fleet status         # Show current fleet config
+"""
+
+import argparse
+import json
+import os
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+
+HERMES_HOME = Path.home() / ".hermes"
+FLEET_CONFIG = HERMES_HOME / "fleet_config.json"
+PLUGIN_DIR = HERMES_HOME / "plugins" / "hermes-fleet" / "dashboard"
+
+
+def _get_local_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
+
+def _save_config(cfg: dict):
+    FLEET_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+    FLEET_CONFIG.write_text(json.dumps(cfg, indent=2))
+    print(f"  Config saved to {FLEET_CONFIG}")
+
+
+def _load_config() -> dict:
+    if FLEET_CONFIG.exists():
+        return json.loads(FLEET_CONFIG.read_text())
+    return {"mode": None}
+
+
+def cmd_setup_master():
+    """Configure this agent as the fleet master (orchestrator)."""
+    print("\n╔══════════════════════════════════════════╗")
+    print("║  Setting up as FLEET MASTER             ║")
+    print("╚══════════════════════════════════════════╝\n")
+
+    # Ensure dashboard config has basic auth for network binding
+    print("🔧 Checking dashboard auth config...")
+    result = subprocess.run(
+        ["hermes", "config", "get", "dashboard.basic_auth.username"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        print("  ⚠️  Dashboard needs auth for network access. Setting default...")
+        subprocess.run(
+            ["hermes", "config", "set", "dashboard.basic_auth.username", "admin"],
+            capture_output=True,
+        )
+        # Generate password hash for "hermes"
+        hash_result = subprocess.run(
+            ["python3", "-c", "from plugins.dashboard_auth.basic import hash_password; print(hash_password('hermes'))"],
+            capture_output=True, text=True,
+        )
+        if hash_result.returncode == 0:
+            pw_hash = hash_result.stdout.strip()
+            subprocess.run(
+                ["hermes", "config", "set", "dashboard.basic_auth.password_hash", pw_hash],
+                capture_output=True,
+            )
+            print("  ✅ Login: admin / hermes")
+    else:
+        print(f"  ✅ Auth already configured (user: {result.stdout.strip()})")
+
+    # Ensure the plugin is installed
+    plugin_manifest = PLUGIN_DIR / "manifest.json"
+    if plugin_manifest.exists():
+        print("  ✅ Fleet plugin installed")
+    else:
+        print("  ❌ Fleet plugin not found at", plugin_manifest)
+        print("  Run: cp -r <repo>/plugins/hermes-fleet ~/.hermes/plugins/")
+        sys.exit(1)
+
+    # Save config
+    cfg = {
+        "mode": "master",
+        "dashboard_url": f"http://{_get_local_ip()}:9119",
+        "fleet_api": f"http://127.0.0.1:9119/api/plugins/hermes-fleet",
+    }
+    _save_config(cfg)
+
+    print("\n📋 Master is ready!")
+    print(f"  Dashboard:      {cfg['dashboard_url']}  (login: admin / hermes)")
+    print(f"  Fleet API:      {cfg['fleet_api']}")
+    print(f"\n📌 Other agents connect by running:")
+    print(f"  hermes-fleet setup node --master {cfg['dashboard_url']}")
+    print()
+
+    # Start dashboard if not running
+    print("🚀 Starting Hermes Dashboard...")
+    subprocess.Popen(
+        ["hermes", "dashboard", "--host", "0.0.0.0", "--port", "9119"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    print("  Dashboard starting on", cfg['dashboard_url'])
+
+
+def cmd_setup_node(master_url: str = None):
+    """Configure this agent as a fleet node (worker)."""
+    print("\n╔══════════════════════════════════════════╗")
+    print("║  Setting up as FLEET NODE               ║")
+    print("╚══════════════════════════════════════════╝\n")
+
+    if not master_url:
+        master_url = input("  Master dashboard URL (e.g. http://10.0.1.50:9119): ").strip()
+        if not master_url:
+            print("  ❌ Master URL required")
+            sys.exit(1)
+
+    master_url = master_url.rstrip("/")
+
+    # Get a name for this node
+    default_name = f"node-{socket.gethostname()}"
+    node_name = input(f"  Node name [{default_name}]: ").strip() or default_name
+
+    # Determine port for hermes proxy
+    proxy_port = input("  Port for hermes proxy [8080]: ").strip() or "8080"
+
+    # Save config
+    local_ip = _get_local_ip()
+    cfg = {
+        "mode": "node",
+        "master_url": master_url,
+        "node_name": node_name,
+        "proxy_url": f"http://{local_ip}:{proxy_port}",
+        "proxy_port": int(proxy_port),
+    }
+    _save_config(cfg)
+
+    print(f"\n🚀 Starting hermes proxy on port {proxy_port}...")
+    subprocess.Popen(
+        ["hermes", "proxy", "--port", proxy_port, "--host", "0.0.0.0"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+    print(f"  ✅ Proxy running at {cfg['proxy_url']}")
+
+    # Register with master
+    print(f"  Registering with master at {master_url}...")
+    import urllib.request
+    payload = json.dumps({
+        "node_id": f"node-{socket.gethostname()}",
+        "name": node_name,
+        "api_url": cfg["proxy_url"],
+    }).encode()
+
+    try:
+        req = urllib.request.Request(
+            f"{master_url}/api/plugins/hermes-fleet/nodes/register",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read())
+            print(f"  ✅ Registered! Node ID: {result.get('node_id', 'unknown')}")
+    except Exception as e:
+        print(f"  ⚠️  Registration failed: {e}")
+        print("  Run this to register later:")
+        print(f'  curl -X POST {master_url}/api/plugins/hermes-fleet/nodes/register \\')
+        print(f'    -H "Content-Type: application/json" \\')
+        print(f'    -d \'{{"api_url": "{cfg["proxy_url"]}", "name": "{node_name}"}}\'')
+
+    print(f"\n📋 Node setup complete!")
+
+
+def cmd_status():
+    """Show current fleet configuration."""
+    cfg = _load_config()
+    mode = cfg.get("mode", "not configured")
+
+    print(f"\nHermes Fleet Status")
+    print(f"  Mode: {mode}")
+
+    if mode == "master":
+        print(f"  Dashboard: {cfg.get('dashboard_url', 'unknown')}")
+        print(f"  Fleet API: {cfg.get('fleet_api', 'unknown')}")
+        # Quick check if dashboard is running
+        import urllib.request
+        try:
+            resp = urllib.request.urlopen(f"{cfg['fleet_api']}/nodes", timeout=3)
+            data = json.loads(resp.read())
+            print(f"  Connected nodes: {data.get('count', 0)}")
+            for n in data.get("nodes", []):
+                print(f"    - {n.get('name', n['id']):25s} {n.get('status', '?'):10s} {n.get('api_url', '')}")
+        except Exception:
+            print("  ⚠️  Dashboard not reachable")
+
+    elif mode == "node":
+        print(f"  Master: {cfg.get('master_url', 'unknown')}")
+        print(f"  Proxy:  {cfg.get('proxy_url', 'unknown')}")
+        # Check if proxy is running
+        import urllib.request
+        try:
+            resp = urllib.request.urlopen(f"{cfg['proxy_url']}/v1/models", timeout=3)
+            print("  ✅ Proxy is running")
+        except Exception:
+            print("  ⚠️  Proxy not reachable")
+    else:
+        print("  Run: hermes-fleet setup")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Hermes Fleet — multi-agent setup")
+    sub = parser.add_subparsers(dest="command")
+
+    # Setup
+    setup_p = sub.add_parser("setup", help="Configure this agent as master or node")
+    setup_p.add_argument("role", nargs="?", choices=["master", "node"], help="Role to configure")
+    setup_p.add_argument("--master", "-m", help="Master URL (for node setup)")
+
+    # Status
+    sub.add_parser("status", help="Show fleet configuration and status")
+
+    args = parser.parse_args()
+
+    if args.command == "setup":
+        if args.role == "master":
+            cmd_setup_master()
+        elif args.role == "node":
+            cmd_setup_node(args.master)
+        else:
+            print("Select role:")
+            print("  hermes-fleet setup master   — This agent is the fleet orchestrator")
+            print("  hermes-fleet setup node     — This agent is a worker node")
+            sys.exit(1)
+    elif args.command == "status":
+        cmd_status()
+    else:
+        parser.print_help()
+
+
+if __name__ == "__main__":
+    main()
